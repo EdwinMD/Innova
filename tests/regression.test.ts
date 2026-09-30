@@ -1,0 +1,157 @@
+/**
+ * Fallos reales, convertidos en pruebas.
+ *
+ * La estabilización de un sistema no determinista procede por acumulación de
+ * casos observados. Cada fallo detectado en una corrida se declara aquí, y
+ * desde entonces ninguna versión futura puede reintroducirlo sin que las
+ * pruebas lo señalen.
+ *
+ * Este archivo es el que crece con el uso. Los cuatro primeros casos salieron
+ * de corridas reales durante la preparación del taller; el quinto es el
+ * contrapeso, y el último espera el fallo que usted observe.
+ *
+ *     npm test -- regression
+ */
+
+import { describe, expect, it } from "vitest";
+
+import {
+  checkArithmetic,
+  checkCoverage,
+  checkTieBreak,
+  runAllChecks,
+} from "../src/guardrails/checks.js";
+import {
+  makeComparisonSchema,
+  type Comparison,
+  type Constraints,
+  type Quote,
+} from "../src/domain/schemas.js";
+
+/** Las restricciones del caso, que en producción salen de la requisición. */
+const CASE_CONSTRAINTS: Constraints = {
+  quantity: 40,
+  maxLeadTimeBusinessDays: 10,
+  budgetCapUsd: 7_000,
+};
+
+function quote(overrides: Partial<Quote> & { supplier: string }): Quote {
+  return {
+    unitPriceUsd: 159,
+    freightUsd: 0,
+    totalDeliveredUsd: 6360,
+    leadTimeBusinessDays: 8,
+    meetsLeadTime: true,
+    meetsBudget: true,
+    evidence: "Cita textual de la cotización recibida",
+    ...overrides,
+  };
+}
+
+/** Comparativo correcto del caso, con los cinco proveedores del encargo. */
+function comparison(overrides: Partial<Comparison> = {}): Comparison {
+  return {
+    quotes: [
+      quote({ supplier: "MayoristaZeta", unitPriceUsd: 159, totalDeliveredUsd: 6360 }),
+      quote({
+        supplier: "Suministros Delta",
+        unitPriceUsd: 164,
+        freightUsd: 60,
+        totalDeliveredUsd: 6620,
+        leadTimeBusinessDays: 9,
+      }),
+      quote({
+        supplier: "Tecnoimport",
+        unitPriceUsd: 168,
+        freightUsd: 85,
+        totalDeliveredUsd: 6805,
+        leadTimeBusinessDays: 6,
+      }),
+      quote({
+        supplier: "GlobalStock",
+        unitPriceUsd: 149,
+        totalDeliveredUsd: 5960,
+        leadTimeBusinessDays: 22,
+        meetsLeadTime: false,
+      }),
+    ],
+    noResponse: [{ supplier: "ImportAndina", status: "in_progress", detail: "En cola." }],
+    anomalies: [],
+    recommendedSupplier: "MayoristaZeta",
+    rationale: "Menor total puesto en bodega entre las que cumplen el plazo.",
+    ...overrides,
+  };
+}
+
+describe("fallos observados en corridas reales", () => {
+  it("el precio por caja tomado como total", () => {
+    // Observado con gemini-3.1-flash-lite. La cotización de MayoristaZeta dice
+    // 1.590,00 por caja de diez unidades. El modelo copió esa cifra como total
+    // puesto en bodega, cuando el total de 40 unidades son 6.360.
+    const findings = checkArithmetic(
+      comparison({
+        quotes: [quote({ supplier: "MayoristaZeta", unitPriceUsd: 159, totalDeliveredUsd: 1590 })],
+      }),
+      CASE_CONSTRAINTS,
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.detail).toContain("6360.00");
+  });
+
+  it("un proveedor desaparecido del informe", () => {
+    // Observado durante la preparación: el informe traía cuatro proveedores de
+    // los cinco del encargo, sin declarar al quinto como ausencia. Nada se
+    // reportó como error: es una falla silenciosa, el modo más difícil de
+    // detectar porque nada indica que falta algo.
+    const findings = checkCoverage(
+      comparison({ quotes: [quote({ supplier: "MayoristaZeta" })], noResponse: [] }),
+    );
+
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings.map((finding) => finding.detail).join(" ")).toContain("ImportAndina");
+  });
+
+  it("el plazo omitido cuando el campo admitía valor por defecto", () => {
+    // Observado con el esquema anterior, donde `leadTimeBusinessDays` tenía
+    // `.default(null)`: el modelo omitía el campo y la verificación de plazo
+    // se quedaba sin nada que comprobar. El esquema actual lo exige.
+    const withoutLeadTime = {
+      ...comparison(),
+      quotes: [{ ...quote({ supplier: "MayoristaZeta" }), leadTimeBusinessDays: undefined }],
+    };
+
+    expect(makeComparisonSchema(CASE_CONSTRAINTS).safeParse(withoutLeadTime).success).toBe(false);
+  });
+
+  it("una recomendación que cumple pero no es la más barata", () => {
+    // Observado con gpt-5.4-mini al plantearle un encargo distinto del caso:
+    // recomendó a Tecnoimport, que cumple plazo y presupuesto, existiendo
+    // MayoristaZeta 445 dólares más barato y también conforme. Las cinco
+    // verificaciones de entonces pasaban todas: ninguna miraba el criterio de
+    // desempate que el encargo declara.
+    const findings = checkTieBreak(
+      comparison({ recommendedSupplier: "Tecnoimport" }),
+      CASE_CONSTRAINTS,
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.check).toBe("tie-break");
+  });
+
+  it("un comparativo correcto no produce hallazgos", () => {
+    // El contrapeso: sin esta prueba, una verificación que siempre reporta
+    // algo pasaría las tres anteriores.
+    const sources = new Map(
+      comparison().quotes.map((q) => [q.supplier, `Cotización.\n${q.evidence}\nFin.`]),
+    );
+
+    expect(runAllChecks(comparison(), sources, CASE_CONSTRAINTS)).toEqual([]);
+  });
+
+  // Pendiente de completar. Ejecutar `npm run agent` hasta observar un
+  // resultado que no debería haberse aceptado, y declarar aquí la prueba que
+  // lo detecta. El sistema mejora por acumulación de fallos observados, no por
+  // ajustar las instrucciones hasta que una corrida resulte correcta.
+  it.todo("el fallo observado en una corrida propia");
+});

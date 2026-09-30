@@ -1,0 +1,14 @@
+TECNOIMPORT S.A. — Cotizacion TI-20260916-6362
+
+Descripcion                                    Cant.   Unitario    Importe
+{{linea}}
+{{flete}}
+                                                  Total puesto en bodega: {{total}}
+
+IMPORTANTE: el precio unitario de USD {{unitario}} no incluye flete. El despacho
+completo a bodega del cliente se factura aparte por USD {{fleteUsd}}.
+
+Plazo de entrega: 6 dias habiles desde la confirmacion
+Forma de pago: 50% anticipo, 50% contra entrega
+Garantia: 12 meses de fabrica
+Validez: 15 dias calendario
